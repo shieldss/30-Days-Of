@@ -1,0 +1,64 @@
+name: Publish GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Prepare site and stamp commit version
+        env:
+          APP_VERSION: ${{ github.sha }}
+        run: |
+          python3 - <<'PYBUILD'
+          import os
+          import shutil
+          from pathlib import Path
+
+          version = os.environ["APP_VERSION"][:12]
+          site = Path("_site")
+          site.mkdir()
+          for name in ("index.html", "challenge-app.js", "styles.css", "manifest.json", "sw.js"):
+              source = Path(name)
+              content = source.read_text()
+              if name in ("index.html", "challenge-app.js", "sw.js"):
+                  if "__APP_VERSION__" not in content:
+                      raise SystemExit(f"Version placeholder missing from {name}")
+                  content = content.replace("__APP_VERSION__", version)
+              (site / name).write_text(content)
+          shutil.copytree("assets", site / "assets")
+          PYBUILD
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish site
+        id: deployment
+        uses: actions/deploy-pages@v4

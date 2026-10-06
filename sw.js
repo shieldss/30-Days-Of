@@ -1,6 +1,6 @@
-const VERSION = '30days-v1.0.1-build-13';
+const VERSION = '30days-__APP_VERSION__';
 const CACHE_PREFIX = '30days-';
-const CORE = ['./','./index.html','./styles.css?v=1.0.1-8','./challenge-app.js?v=1.0.1-13','./manifest.json','./assets/logo.svg','./assets/icon.svg','./assets/icon-192.png','./assets/icon-512.png','./assets/icon-maskable-512.png'];
+const CORE = ['./','./index.html','./styles.css?v=__APP_VERSION__','./challenge-app.js?v=__APP_VERSION__','./manifest.json','./assets/logo.svg','./assets/icon.svg','./assets/icon-192.png','./assets/icon-512.png','./assets/icon-maskable-512.png'];
 const cacheKey = request => { const url = new URL(typeof request === 'string' ? request : request.url, self.registration.scope); url.searchParams.set('__app_cache', VERSION); return url.href; };
 self.addEventListener('install',event=>event.waitUntil(caches.open(VERSION).then(cache=>cache.addAll(CORE.map(cacheKey)))));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith(CACHE_PREFIX)&&key!==VERSION).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));

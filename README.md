@@ -39,7 +39,7 @@ Open <http://localhost:8000>. Service workers and PWA installation require local
 1. Create a GitHub repository and put the contents of this project at its repository root.
 2. Commit and push the files to the `main` branch.
 3. In repository **Settings → Pages**, set the build/deployment source to **GitHub Actions**.
-4. The included `.github/workflows/pages.yml` publishes the repository root whenever a commit reaches `main`. The workflow can also be started from the Actions tab with **Run workflow**.
+4. The included `.github/workflows/pages.yml` stamps each build with its commit ID and publishes the repository root whenever a commit reaches `main`. Pull requests build the site but do not publish it.
 5. Wait for the Pages deployment job to finish, then open the URL shown in the job summary.
 
 All application resources use relative paths (`./...`) and the web manifest scopes itself to its folder, so GitHub Pages project sites under `https://<owner>.github.io/<repository>/` work without a build step or repository-specific path edits. Keep `index.html`, `challenge-app.js`, `styles.css`, `manifest.json`, `sw.js`, and `assets/` together at the published root.
@@ -94,7 +94,7 @@ Each challenge stores the selected date as the date corresponding to the entered
 
 ## Release process
 
-The app version is centralized as `VERSION` in `challenge-app.js`; update the service-worker cache name in `sw.js` to a new unique build identifier and increment the asset query string in `index.html` and `sw.js` when preparing a new version. Use semantic versioning, update this README if user-facing behavior changes, then commit to `main`. GitHub Actions publishes the new version and the service worker offers it to installed users.
+The Pages workflow stamps each build with the first 12 characters of its Git commit SHA. This value updates the app version, asset URLs, and service-worker cache on every deployment to `main`, prompting installed apps to load the new shell. Pull requests build the site artifact without publishing it; merging to `main` deploys it. Keep the `__APP_VERSION__` placeholders in `index.html`, `challenge-app.js`, and `sw.js` intact so the workflow can replace them.
 
 ## Accessibility
 
