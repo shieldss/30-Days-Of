@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f8f5">
+  <meta name="description" content="A calm, local-first tracker for showing up every day for 30 days.">
+  <title>30 Days of…</title>
+  <link rel="icon" href="./assets/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./assets/icon-192.png">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="stylesheet" href="./styles.css?v=1.0.0-7">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <a class="brand" href="#today" aria-label="30 Days of… home">
+        <img src="./assets/logo.svg" class="brand-logo" alt="" width="40" height="40">
+        <span>30 Days <span class="brand-of">of…</span></span>
+      </a>
+      <div class="top-actions"><button id="installBtn" class="button button-quiet install-button" hidden>Install app</button><button class="avatar-button" id="quickAdd" aria-label="Create a challenge">＋</button></div>
+    </header>
+    <main id="main" class="main" tabindex="-1"></main>
+    <nav class="bottom-nav" aria-label="Main navigation">
+      <a href="#today" data-nav="today"><span class="nav-icon">◷</span><span>Today</span></a>
+      <a href="#challenges" data-nav="challenges"><span class="nav-icon">▦</span><span>Challenges</span></a>
+      <a href="#awards" data-nav="awards"><span class="nav-icon">✳</span><span>Awards</span></a>
+      <a href="#history" data-nav="history"><span class="nav-icon">↺</span><span>History</span></a>
+      <a href="#settings" data-nav="settings"><span class="nav-icon">⚙</span><span>Settings</span></a>
+    </nav>
+  </div>
+  <div id="modalRoot"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="updateBanner" class="update-banner" hidden><span>A new version of 30 Days of… is ready.</span><button id="updateNow" class="button button-small">Update now</button><button id="dismissUpdate" class="icon-button" aria-label="Dismiss">×</button></div>
+  <script src="./challenge-app.js?v=1.0.0-12" defer></script>
+</body>
+</html>
