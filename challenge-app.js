@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const VERSION = '1.0.1';
+  const VERSION = '__APP_VERSION__';
   const DB_NAME = 'thirty-days-of';
   const STORE = 'app';
   const $ = (s, root=document) => root.querySelector(s);
