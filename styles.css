@@ -173,3 +173,6 @@ body.dark .notice{background:rgba(197,226,234,.08)}
 body.dark .update-banner{background:rgba(29,43,57,.96)}
 .award-pop-inner{border-color:rgba(255,255,255,.72);background:rgba(255,255,255,.94);backdrop-filter:blur(20px)}
 body.dark .award-pop-inner{border-color:var(--line);background:rgba(29,43,57,.96)}
+
+.graphic-prompt{min-height:300px;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
+@media(max-width:760px){.today-tools{flex-wrap:wrap}.today-tools .text-button{padding:8px 5px}.empty-state .button-row{justify-content:center}}
