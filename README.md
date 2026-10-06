@@ -56,7 +56,7 @@ The site must be served from `localhost` or HTTPS. The app keeps its data on the
 
 ## Offline behavior
 
-After the first successful load, the service worker stores the app shell and same-origin resources. The application, challenge records, and settings continue to work offline. A later deployment installs in the background; the app displays an **Update now** prompt when the new worker is ready. Updates refresh the application shell while IndexedDB user data remains intact.
+After the first successful load, the service worker stores the app shell and same-origin resources. The application, challenge records, and settings continue to work offline. A later deployment downloads in the background; the app displays an **Update now** prompt only when a newer service worker is waiting. Choosing **Update now** activates the new version and refreshes the app while IndexedDB user data remains intact.
 
 The first visit requires a network connection. Browser storage can be cleared by browser settings, private browsing, or device cleanup, so export backups periodically.
 

@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const DB_NAME = 'thirty-days-of';
   const STORE = 'app';
   const $ = (s, root=document) => root.querySelector(s);
@@ -89,11 +89,14 @@
   document.addEventListener('input',e=>{if(e.target.id==='search'){searchTerm=e.target.value;const pos=e.target.selectionStart;render();const next=$('#search');next?.focus();next?.setSelectionRange(pos,pos)}});
   document.addEventListener('change',async e=>{const setting=e.target.dataset.setting;if(!setting)return;const val=e.target.type==='checkbox'?e.target.checked:e.target.value;if(setting==='notifications'&&val){const ok=await requestNotifications();if(!ok){data.settings.notifications=false;render();return}}else{data.settings[setting]=val;await save();if(setting==='theme')applyTheme();render()}});
   window.addEventListener('hashchange',render);
+  const isInstalledDisplay=()=>matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
+  $('#installBtn').hidden=isInstalledDisplay();
   window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e;$('#installBtn').hidden=false});
-  $('#installBtn').addEventListener('click',async()=>{if(deferredInstall){deferredInstall.prompt();await deferredInstall.userChoice;deferredInstall=null;$('#installBtn').hidden=true}else installHelp()});
+  window.addEventListener('appinstalled',()=>{deferredInstall=null;$('#installBtn').hidden=true;toastMsg('30 Days of… is installed.')});
+  $('#installBtn').addEventListener('click',async()=>{if(deferredInstall){const installPrompt=deferredInstall;deferredInstall=null;await installPrompt.prompt();const result=await installPrompt.userChoice;if(result.outcome==='accepted')$('#installBtn').hidden=true;else if(!isInstalledDisplay())$('#installBtn').hidden=false}else installHelp()});
   $('#quickAdd').addEventListener('click',()=>challengeForm());
   $('#updateNow').addEventListener('click',()=>window.__swWaiting?.postMessage({type:'SKIP_WAITING'}));$('#dismissUpdate').addEventListener('click',()=>$('#updateBanner').hidden=true);
   document.addEventListener('visibilitychange',checkReminders);setInterval(checkReminders,30000);
-  async function init(){await load();const newlyEarned=[];for(const c of data.challenges)if(c.status==='active')newlyEarned.push(...refreshAwards(c));if(newlyEarned.length)await save();render();if(newlyEarned.length)showAward(newlyEarned[0]);if('serviceWorker'in navigator){try{const hadController=!!navigator.serviceWorker.controller;const reg=await navigator.serviceWorker.register('./sw.js',{scope:'./'});if(reg.waiting&&hadController){window.__swWaiting=reg.waiting;$('#updateBanner').hidden=false}reg.addEventListener('updatefound',()=>{const worker=reg.installing;worker?.addEventListener('statechange',()=>{if(worker.state==='installed'&&hadController){window.__swWaiting=worker;$('#updateBanner').hidden=false}})});navigator.serviceWorker.addEventListener('controllerchange',()=>location.reload());reg.update()}catch(e){console.info('Service worker unavailable',e)}}}
+  async function init(){await load();const newlyEarned=[];for(const c of data.challenges)if(c.status==='active')newlyEarned.push(...refreshAwards(c));if(newlyEarned.length)await save();render();if(newlyEarned.length)showAward(newlyEarned[0]);if('serviceWorker'in navigator){try{const reg=await navigator.serviceWorker.register('./sw.js',{scope:'./'});const showWaitingUpdate=worker=>{if(worker&&reg.waiting===worker&&navigator.serviceWorker.controller){window.__swWaiting=worker;$('#updateBanner').hidden=false}};if(reg.waiting&&navigator.serviceWorker.controller)showWaitingUpdate(reg.waiting);reg.addEventListener('updatefound',()=>{const worker=reg.installing;worker?.addEventListener('statechange',()=>{if(worker.state==='installed'&&navigator.serviceWorker.controller){window.__swWaiting=worker;$('#updateBanner').hidden=false}})});navigator.serviceWorker.addEventListener('controllerchange',()=>location.reload(),{once:true});reg.update()}catch(e){console.info('Service worker unavailable',e)}}}
   init();
 })();
