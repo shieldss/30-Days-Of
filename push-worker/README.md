@@ -38,3 +38,9 @@ npx wrangler deploy
 Use the same Cloudflare account and Worker name. Do not rerun initial setup or rotate the pairing key. Open the app online and tap **Settings → Notifications → Background push → Sync now** to send the current schedule.
 
 For development, run `workerd test push-worker/runtime-tests/config.capnp` from the repository root. It runs both scheduled reminder types against a simulated provider using the Workers runtime and verifies provider redirects are not followed.
+
+## Check notifications
+
+- **Sync now** contacts the Worker even if the schedule hasn't changed. It shows the next eligible reminder from this device's schedule or explains why there is none. Already-sent reminders won't repeat.
+- **Test browser notification only** checks whether the device can display a notification, not whether push delivery works. It does not need the Worker.
+- **Send test push** needs the current Worker. It makes a real, separately labeled push without changing challenge progress, reminder settings, or pending reminders. If the provider accepts the test, check for the notification on that device. An accepted request does not guarantee that the device displayed it.

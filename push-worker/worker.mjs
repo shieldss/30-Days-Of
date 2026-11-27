@@ -51,23 +51,27 @@ export async function vapidRequest(subscription,env,kind,{now=Date.now(),ttl=90}
   'Content-Encoding':'aes128gcm','Content-Type':'application/octet-stream',Topic:'thirty-days-'+kind
  },body:await encodePush(subscription.keys,{kind})});
 }
+function normalizeSubscription(subscription){
+ const keys=subscription?.keys||{}, endpoint=pushEndpoint(subscription?.endpoint).href;
+ if(!/^[A-Za-z0-9_-]{87}$/.test(keys.p256dh||'')||!/^[A-Za-z0-9_-]{22}$/.test(keys.auth||'')||unb64(keys.p256dh)[0]!==4)throw Error('Invalid subscription keys.');
+ return {endpoint,keys:{p256dh:keys.p256dh,auth:keys.auth}};
+}
 export function validateSchedule(raw,now=Date.now()){
  if(!Array.isArray(raw?.jobs)||raw.jobs.length>60)throw Error('Invalid schedule size.');
- const keys=raw.subscription?.keys||{}, endpoint=pushEndpoint(raw.subscription?.endpoint).href;
- if(!/^[A-Za-z0-9_-]{87}$/.test(keys.p256dh||'')||!/^[A-Za-z0-9_-]{22}$/.test(keys.auth||'')||unb64(keys.p256dh)[0]!==4)throw Error('Invalid subscription keys.');
+ const subscription=normalizeSubscription(raw.subscription);
  const ids=new Set(),jobs=[];
  for(const j of raw.jobs){
   if(!/^\d{4}-\d{2}-\d{2}-(daily|incomplete)$/.test(j?.id||'')||ids.has(j.id)||!Number.isSafeInteger(j.due)||j.due>now+HORIZON||!Number.isSafeInteger(j.until)||j.until<=j.due||j.until-j.due>LIMIT)throw Error('Invalid reminder time or ID.');
   ids.add(j.id);if(j.until>now)jobs.push({id:j.id,due:j.due,until:j.until});
  }
  jobs.sort((a,b)=>a.due-b.due||a.id.localeCompare(b.id));
- return {subscription:{endpoint,keys:{p256dh:keys.p256dh,auth:keys.auth}},jobs};
+ return {subscription,jobs};
 }
 function response(status,body){return body===undefined?new Response(null,{status}):Response.json(body,{status});}
 function cors(r,origin){
  const out=new Response(r.body,r);
  out.headers.set('Access-Control-Allow-Origin',origin);
- out.headers.set('Access-Control-Allow-Methods','GET, PUT, DELETE, OPTIONS');
+ out.headers.set('Access-Control-Allow-Methods','GET, PUT, POST, DELETE, OPTIONS');
  out.headers.set('Access-Control-Allow-Headers','Authorization, Content-Type');
  out.headers.set('Cache-Control','no-store');
  out.headers.set('Vary','Origin');
@@ -81,9 +85,9 @@ export default {
   if(request.method==='OPTIONS')return reply(204);
   if(!authorized(request,env.PAIRING_KEY))return reply(401,{error:'Check the pairing key.'});
   if(!/^[A-Za-z0-9_-]{87}$/.test(env.VAPID_PUBLIC_KEY||'')||!env.VAPID_PRIVATE_JWK||!/^mailto:[^\s@]+@[^\s@]+$/.test(env.VAPID_SUBJECT||''))return reply(503,{error:'The reminder service is not fully configured.'});
-  if(path==='/v1/config'&&request.method==='GET')return reply(200,{app:'thirty-days-of',publicKey:env.VAPID_PUBLIC_KEY});
+  if(path==='/v1/config'&&request.method==='GET')return reply(200,{app:'thirty-days-of',publicKey:env.VAPID_PUBLIC_KEY,testPush:true});
   const match=/^\/v1\/device\/([0-9a-f]{32})$/.exec(path);
-  if(!match||!['PUT','DELETE'].includes(request.method))return reply(404);
+  if(!match||!['PUT','POST','DELETE'].includes(request.method))return reply(404);
   const stub=env.REMINDERS.get(env.REMINDERS.idFromName(match[1]));
   if(request.method==='DELETE')return cors(await stub.fetch('https://internal/cancel',{method:'DELETE'}),origin);
   // Read at most 12 KiB even when Content-Length is missing.
@@ -92,7 +96,12 @@ export default {
    const reader=request.body.getReader(), chunks=[];let n=0;
    for(;;){const x=await reader.read();if(x.done)break;n+=x.value.length;if(n>12288){await reader.cancel();return reply(413);}chunks.push(x.value);}
    const bytes=new Uint8Array(n);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
-   const normalized=validateSchedule(JSON.parse(new TextDecoder().decode(bytes)));
+   const data=JSON.parse(new TextDecoder().decode(bytes));
+   if(request.method==='POST'){
+    const subscription=normalizeSubscription(data);
+    return cors(await stub.fetch('https://internal/test',{method:'POST',body:JSON.stringify(subscription)}),origin);
+   }
+   const normalized=validateSchedule(data);
    return cors(await stub.fetch('https://internal/schedule',{method:'PUT',body:JSON.stringify(normalized)}),origin);
   }catch{return reply(400,{error:'Invalid browser push subscription or reminder time.'});}
  }
@@ -115,10 +124,25 @@ export class ChallengeReminders{
   return Object.fromEntries(Object.entries(current).filter(([,until])=>until>now));
  }
  async fetch(request){
+  if(request.method==='POST')return this.test(await request.json());
   const sent=await this.marks();
   if(request.method==='DELETE'){await this.write(null,sent);return response(204);}
   const plan=await request.json();plan.revision=crypto.randomUUID();
   await this.write(plan,sent);return response(204);
+ }
+ async test(subscription){
+  const now=Date.now();
+  if((await this.storage.get('testAfter')||0)>now)return response(429,{error:'Wait 30 seconds between test pushes.'});
+  await this.storage.put('testAfter',now+30000);
+  let req;
+  try{req=await vapidRequest(subscription,this.env,'test',{now,ttl:90});}
+  catch{return response(502,{error:'The reminder server could not prepare an encrypted test push. Check the Worker and its signing configuration.'});}
+  try{
+   const result=await fetch(req,{signal:AbortSignal.timeout(8000)});
+   if(result.ok)return response(204);
+   if(result.status===404||result.status===410)return response(409,{error:'The browser subscription has expired. Disconnect push and connect again, then try again.'});
+   return response(502,{error:'The push provider rejected the test (HTTP '+result.status+').'});
+  }catch{return response(502,{error:'Could not reach the push provider. Try again in 30 seconds.'});}
  }
  async alarm(info={}){
   const now=Date.now(),plan=await this.storage.get('plan'),sent=await this.marks(now);
