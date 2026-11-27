@@ -1,0 +1,3 @@
+.push-secrets.local.json
+.wrangler/
+node_modules/
