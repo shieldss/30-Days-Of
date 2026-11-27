@@ -7,7 +7,8 @@ export default {
     !request.headers.get('Authorization')?.startsWith('vapid t='))
    return new Response(null,{status:400});
   if(kind==='daily-redirect')return Response.redirect('https://other.example/',302);
-  if(!['daily','incomplete'].includes(kind)||
+  if(kind==='test-expired')return new Response(null,{status:410});
+  if(!['daily','incomplete','test'].includes(kind)||
     request.headers.get('Topic')!=='thirty-days-'+kind||
     request.headers.get('Content-Encoding')!=='aes128gcm'||(await request.arrayBuffer()).byteLength<=86)
    return new Response(null,{status:400});

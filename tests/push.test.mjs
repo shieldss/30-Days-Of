@@ -80,3 +80,25 @@ test('alarm groups simultaneous reminders, dedups across sync, then cancels pend
   assert.equal(map.has('plan'),false);assert.ok(map.has('sent'));
  }finally{globalThis.fetch=native;}
 });
+
+test('sync messaging distinguishes an empty schedule from the next eligible reminder',async()=>{
+ const {syncMessage}=await import('../assets/push-reminders.mjs');
+ assert.match(syncMessage([]),/No reminders are scheduled/);
+ const due=+new Date(2026,10,27,16);
+ assert.match(syncMessage([{id:'2026-11-27-incomplete',due}]),/Incomplete day/);
+ assert.match(syncMessage([{id:'2026-11-27-daily',due}]),/Daily challenge/);
+});
+
+test('service worker distinguishes a test notification from both reminder types',async()=>{
+ const {runInNewContext}=await import('node:vm');
+ const {readFile}=await import('node:fs/promises');
+ const listeners={},shown=[];
+ runInNewContext(await readFile(new URL('../sw.js',import.meta.url),'utf8'),{self:{
+  addEventListener:(type,listener)=>listeners[type]=listener,
+  registration:{showNotification:async(title,options)=>shown.push({title,...options})}
+ }});
+ for(const kind of ['test','daily','incomplete','unknown'])
+  listeners.push({data:{json:()=>({kind})},waitUntil:()=>{}});
+ assert.equal(shown[0].title,'30 Days of… · Test push');
+ assert.deepEqual(shown.map(item=>item.tag),['30-days-reminder-test','30-days-reminder-daily','30-days-reminder-incomplete']);
+});

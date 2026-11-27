@@ -77,7 +77,7 @@ export async function connect(rawUrl,rawKey,getState){
   catch(err){if(created)await sub.unsubscribe().catch(()=>{});throw err;}
  });
 }
-export function reconcile(getState){
+export function reconcile(getState,{force=false}={}){
  if(!supported()||!getConfig())return Promise.resolve();
  return queue(async()=>{
   const c=getConfig();if(!c)return;
@@ -91,19 +91,55 @@ export function reconcile(getState){
    }
    const jobs=reminderSchedule(state),fingerprint=JSON.stringify([c.id,jobs]);
    if(!state.settings.notifications&&jobs.length===0){ // Cancel immediately when reminders or app data are turned off.
-    if(last!==fingerprint)await api(c,path(c),'DELETE');
+    if(force||last!==fingerprint)await api(c,path(c),'DELETE');
     last=fingerprint;status('Push reminders are paused on this device.');return;
    }
-   if(Notification.permission!=='granted')throw Error('Notifications are blocked in this browser’s settings.');
+   if(Notification.permission!=='granted')throw Error('Notifications are blocked. Allow them for 30 Days of… in browser settings, then tap Sync now.');
    const sub=await (await registration()).pushManager.getSubscription();
-   if(!sub)throw Error('Connect push again to renew this browser’s subscription.');
-   if(last===fingerprint)return;
+   if(!sub)throw Error('Disconnect push and connect again to renew this browser’s subscription.');
+   if(!force&&last===fingerprint)return;
    await api(c,path(c),'PUT',{subscription:sub.toJSON(),jobs});last=fingerprint;
-   status('Push connected. Reminders are synced for this device.');
+   status(force?syncMessage(jobs):'Push connected. Reminders are synced for this device.');
   }catch(err){status(navigator.onLine===false?'Not synced while offline. Reopen the app online to send changes.':err.message);}
  });
 }
 export function disconnect(getState){
  const c=getConfig();if(!c)return Promise.resolve();
  put({...c,deleting:true});return reconcile(getState);
+}
+
+export function syncMessage(jobs){
+ if(!jobs.length)return 'Server synced. No reminders are scheduled. Check that an active challenge has reminders enabled and that Daily challenge or Incomplete day is on.';
+ const next=jobs[0],date=new Date(next.due);
+ const label=next.id.endsWith('-incomplete')?'Incomplete day':'Daily challenge';
+ const when=date.toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+ return 'Server synced. Next reminder on this device’s schedule: '+label+' at '+when+'. The server skips reminders it already sent.';
+}
+export async function testBrowserNotification(){
+ if(!supported()||Notification.permission!=='granted')throw Error('Allow notifications for 30 Days of… in your browser first.');
+ const reg=await registration();
+ await reg.showNotification('30 Days of… · Browser test',{
+  body:'This device can display notifications. This check does not test background push.',
+  icon:'./assets/icon-192.png',badge:'./assets/icon-192.png',tag:'30-days-browser-test'
+ });
+}
+export function testPushDelivery(){
+ return queue(async()=>{
+  const c=getConfig();
+  if(!c||c.deleting)throw Error('Connect background push first.');
+  if(!supported()||Notification.permission!=='granted')throw Error('Allow notifications for 30 Days of… in your browser first.');
+  const reg=await registration(),sub=await reg.pushManager.getSubscription();
+  if(!sub)throw Error('Disconnect push and connect again to renew this browser’s subscription.');
+  const config=await (await api(c,'/v1/config')).json();
+  if(config.app!=='thirty-days-of')throw Error('Use the Worker for 30 Days of…, not Fuel & Flow.');
+  if(config.testPush!==true)throw Error('Update your existing 30 Days of… Worker to enable test push. The browser test and regular reminders still work without this update.');
+  const channel=new MessageChannel();
+  const ready=await new Promise(resolve=>{
+   const timer=setTimeout(()=>resolve(false),2000);
+   channel.port1.onmessage=event=>{clearTimeout(timer);resolve(event.data?.testPush===true);};
+   reg.active.postMessage({type:'PUSH_TEST_SUPPORT'},[channel.port2]);
+  }).finally(()=>channel.port1.close());
+  if(!ready)throw Error('Reload 30 Days of… online to activate the app update, then try again.');
+  await api(c,path(c),'POST',sub.toJSON());
+ });
 }
