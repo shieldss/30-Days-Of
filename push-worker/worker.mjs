@@ -45,7 +45,8 @@ export async function vapidRequest(subscription,env,kind,{now=Date.now(),ttl=90}
  const key=await crypto.subtle.importKey('jwk',JSON.parse(env.VAPID_PRIVATE_JWK),{name:'ECDSA',namedCurve:'P-256'},false,['sign']);
  const jwt=jwtPart({typ:'JWT',alg:'ES256'})+'.'+jwtPart({aud:u.origin,exp:Math.floor(now/1000)+12*3600,sub:env.VAPID_SUBJECT});
  const sig=await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},key,enc.encode(jwt));
- return new Request(u,{method:'POST',redirect:'error',headers:{
+ // Cloudflare Workers require manual to reject redirects without forwarding VAPID credentials.
+ return new Request(u,{method:'POST',redirect:'manual',headers:{
   Authorization:'vapid t='+jwt+'.'+b64(sig)+', k='+env.VAPID_PUBLIC_KEY,TTL:String(ttl),Urgency:'normal',
   'Content-Encoding':'aes128gcm','Content-Type':'application/octet-stream',Topic:'thirty-days-'+kind
  },body:await encodePush(subscription.keys,{kind})});

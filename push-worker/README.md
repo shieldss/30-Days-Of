@@ -23,3 +23,18 @@ On the device you want notified, open **30 Days of… → Settings → Notificat
 - The app sends up to 30 days of upcoming reminder times for active challenges. Open the app online after changing a schedule or travelling. Marking a day done/skipped, pausing or ending a challenge, or resetting the app also resyncs; offline changes do not reach the Worker until you're back online.
 - **Notifications** off cancels pending jobs and keeps the connection for next time; **Disconnect push** also unsubscribes this browser. Unpaired devices keep the old in-app reminder mode. A connected device doesn't send duplicate foreground reminders.
 - The Worker stores the browser push subscription and scheduled reminder dates/times and types. It does not receive challenge names, goal text, notes, or history. The push text is generic, and the payload is encrypted. Pairing is per device and not exported in backups. A delivered reminder can be delayed by your browser, OS settings, or network; the relay drops expired jobs.
+
+## Update an existing Worker
+
+To apply a Worker fix, update the existing checkout and deploy in place:
+
+```sh
+cd ~/30-days-of-push
+git pull --ff-only
+cd push-worker
+npx wrangler deploy
+```
+
+Use the same Cloudflare account and Worker name. Do not rerun initial setup or rotate the pairing key. Open the app online and tap **Settings → Notifications → Background push → Sync now** to send the current schedule.
+
+For development, run `workerd test push-worker/runtime-tests/config.capnp` from the repository root. It runs both scheduled reminder types against a simulated provider using the Workers runtime and verifies provider redirects are not followed.
