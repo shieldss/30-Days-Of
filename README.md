@@ -64,7 +64,7 @@ The first visit requires a network connection. Browser storage can be cleared by
 
 Pausing holds the challenge calendar. When you resume, dates on and after the pause day shift forward by the time spent paused, so paused days do not count as missed.
 
-Notifications are off until enabled in Settings and browser permission is granted. Daily and incomplete-day reminder times are checked while the app is open or when it becomes visible. A static PWA has no server push or guaranteed background scheduler, so browsers may suspend it when fully closed; this app does not claim that closed-app reminders are guaranteed. Browser and operating-system notification settings also affect delivery.
+Notifications are off until enabled in Settings and browser permission is granted. Without a paired Worker, daily and incomplete-day reminders are checked while the app is open or becomes visible. Pair the [optional background push Worker](push-worker) to schedule closed-app reminders in the time zone of the device that syncs them. Browser, OS and network conditions still affect when notifications appear.
 
 ## Backup and restore
 

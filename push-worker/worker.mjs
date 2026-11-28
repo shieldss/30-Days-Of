@@ -1,6 +1,6 @@
 // Web Push for 30 Days of…; only generic reminder kinds are carried in the payload.
 const enc=new TextEncoder();
-const LIMIT=15*60000, HORIZON=31*86400000;
+const LIMIT=15*60000, HORIZON=31*86400000, TEST_DELAY=60000, TEST_WINDOW=3*60000;
 const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
 const jwtPart=v=>b64(enc.encode(JSON.stringify(v)));
 
@@ -47,7 +47,7 @@ export async function vapidRequest(subscription,env,kind,{now=Date.now(),ttl=90}
  const sig=await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},key,enc.encode(jwt));
  // Cloudflare Workers require manual to reject redirects without forwarding VAPID credentials.
  return new Request(u,{method:'POST',redirect:'manual',headers:{
-  Authorization:'vapid t='+jwt+'.'+b64(sig)+', k='+env.VAPID_PUBLIC_KEY,TTL:String(ttl),Urgency:'normal',
+  Authorization:'vapid t='+jwt+'.'+b64(sig)+', k='+env.VAPID_PUBLIC_KEY,TTL:String(ttl),Urgency:kind==='test'?'normal':'high',
   'Content-Encoding':'aes128gcm','Content-Type':'application/octet-stream',Topic:'thirty-days-'+kind
  },body:await encodePush(subscription.keys,{kind})});
 }
@@ -85,11 +85,18 @@ export default {
   if(request.method==='OPTIONS')return reply(204);
   if(!authorized(request,env.PAIRING_KEY))return reply(401,{error:'Check the pairing key.'});
   if(!/^[A-Za-z0-9_-]{87}$/.test(env.VAPID_PUBLIC_KEY||'')||!env.VAPID_PRIVATE_JWK||!/^mailto:[^\s@]+@[^\s@]+$/.test(env.VAPID_SUBJECT||''))return reply(503,{error:'The reminder service is not fully configured.'});
-  if(path==='/v1/config'&&request.method==='GET')return reply(200,{app:'thirty-days-of',publicKey:env.VAPID_PUBLIC_KEY,testPush:true});
-  const match=/^\/v1\/device\/([0-9a-f]{32})$/.exec(path);
-  if(!match||!['PUT','POST','DELETE'].includes(request.method))return reply(404);
+  if(path==='/v1/config'&&request.method==='GET')return reply(200,{app:'thirty-days-of',publicKey:env.VAPID_PUBLIC_KEY,testPush:true,scheduleDiagnostics:true});
+  const match=/^\/v1\/device\/([0-9a-f]{32})(\/scheduled-test)?$/.exec(path);
+  const method=request.method,timed=!!match?.[2];
+  if(!match||!(timed?method==='POST':['GET','PUT','POST','DELETE'].includes(method)))return reply(404);
   const stub=env.REMINDERS.get(env.REMINDERS.idFromName(match[1]));
-  if(request.method==='DELETE')return cors(await stub.fetch('https://internal/cancel',{method:'DELETE'}),origin);
+  const forward=async(route,options)=>{
+   try{return cors(await stub.fetch('https://internal/'+route,options),origin);}
+   catch{return reply(503,{error:'The Worker could not reach its reminder queue. Try Sync now again.'});}
+  };
+  if(method==='GET')return forward('status');
+  if(method==='DELETE')return forward('cancel',{method:'DELETE'});
+
   // Read at most 12 KiB even when Content-Length is missing.
   try{
    if(!request.body)return reply(400,{error:'Missing schedule.'});
@@ -97,75 +104,153 @@ export default {
    for(;;){const x=await reader.read();if(x.done)break;n+=x.value.length;if(n>12288){await reader.cancel();return reply(413);}chunks.push(x.value);}
    const bytes=new Uint8Array(n);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
    const data=JSON.parse(new TextDecoder().decode(bytes));
-   if(request.method==='POST'){
+   if(method==='POST'){
     const subscription=normalizeSubscription(data);
-    return cors(await stub.fetch('https://internal/test',{method:'POST',body:JSON.stringify(subscription)}),origin);
+    return forward(timed?'scheduled-test':'test',{method:'POST',body:JSON.stringify(subscription)});
    }
    const normalized=validateSchedule(data);
-   return cors(await stub.fetch('https://internal/schedule',{method:'PUT',body:JSON.stringify(normalized)}),origin);
+   return forward(data.report===true?'schedule-report':'schedule',{method:'PUT',body:JSON.stringify(normalized)});
   }catch{return reply(400,{error:'Invalid browser push subscription or reminder time.'});}
  }
 };
 
 export class ChallengeReminders{
- constructor(ctx,env){this.storage=ctx.storage;this.env=env;}
+ constructor(ctx,env){this.storage=ctx.storage;this.env=env;this.tail=Promise.resolve();}
+ // Serialize queue updates and alarm dispatch on this device. A provider fetch yields;
+ // without this, an overlapping sync can restore canceled jobs or undo a retry.
+ run(action){
+  const next=this.tail.then(action);
+  this.tail=next.catch(()=>{});
+  return next;
+ }
+ async report(){
+  const now=Date.now(),[plan,test,last,lastTest,alarm]=await Promise.all([
+   this.storage.get('plan'),this.storage.get('scheduledTest'),this.storage.get('lastDelivery'),
+   this.storage.get('lastScheduledTest'),this.storage.getAlarm()
+  ]);
+  const jobs=(plan?.jobs||[]).filter(j=>j.until>now);
+  const next=jobs[0];
+  return {queued:jobs.length,next:next?{
+   due:next.due,...(next.retryAt?{retryAt:next.retryAt}:{}),kind:jobs.some(j=>j.due===next.due&&j.id.endsWith('-incomplete'))?'incomplete':'daily'
+  }:null,alarm,serverTime:now,last:last||null,test:test?{due:test.due}:lastTest||null};
+ }
  async write(plan,sent,now=Date.now()){
   const jobs=(plan?.jobs||[]).filter(j=>j.until>now&&!sent[j.id]);
-  if(jobs.length){
-   await this.storage.put('plan',{...plan,jobs});
-   await this.storage.setAlarm(Math.max(jobs[0].due,now));
-  }else{
-   await this.storage.delete('plan');await this.storage.deleteAlarm();
-   const next=Math.min(...Object.values(sent));if(Number.isFinite(next))await this.storage.setAlarm(next);
-  }
+  const test=await this.storage.get('scheduledTest');
+  const next=Math.min(jobs[0]?Math.max(jobs[0].due,jobs[0].retryAt||0):Infinity,
+   test?Math.max(test.due,test.retryAt||0):Infinity,...Object.values(sent));
+  // Commit queue and its alarm together. No alarm means nothing remains to deliver or expire.
+  await Promise.all([
+   jobs.length?this.storage.put('plan',{...plan,jobs}):this.storage.delete('plan'),
+   Number.isFinite(next)?this.storage.setAlarm(Math.max(next,now+1)):this.storage.deleteAlarm()
+  ]);
  }
  async marks(now=Date.now()){
   const current=await this.storage.get('sent')||{};
   return Object.fromEntries(Object.entries(current).filter(([,until])=>until>now));
  }
  async fetch(request){
-  if(request.method==='POST')return this.test(await request.json());
-  const sent=await this.marks();
-  if(request.method==='DELETE'){await this.write(null,sent);return response(204);}
-  const plan=await request.json();plan.revision=crypto.randomUUID();
-  await this.write(plan,sent);return response(204);
+  const route=new URL(request.url).pathname;
+  // An immediate diagnostic is deliberately independent of the reminder queue.
+  if(request.method==='POST'&&route==='/test')return this.test(await request.json());
+  return this.run(async()=>{
+   if(request.method==='GET'&&route==='/status')return response(200,await this.report());
+   const now=Date.now(),sent=await this.marks(now);
+   if(request.method==='POST'&&route==='/scheduled-test'){
+    const existing=await this.storage.get('scheduledTest');
+    if(existing&&existing.until>now)return response(429,{error:'A scheduled test is already pending. Check its status after it runs.'});
+    const subscription=await request.json(),due=now+TEST_DELAY;
+    await this.storage.put('scheduledTest',{subscription,due,until:due+TEST_WINDOW});
+    await this.write(await this.storage.get('plan'),sent,now);
+    return response(200,{due});
+   }
+   if(request.method==='DELETE'){
+    await Promise.all(['scheduledTest','lastScheduledTest','lastDelivery'].map(key=>this.storage.delete(key)));
+    await this.write(null,sent,now);return response(204);
+   }
+   const plan=await request.json(),existing=await this.storage.get('plan');
+   // A periodic sync must not wipe retry backoff for the same unchanged job.
+   if(existing?.subscription?.endpoint===plan.subscription.endpoint){
+    for(const job of plan.jobs){
+     const old=existing.jobs.find(j=>j.id===job.id&&j.due===job.due&&j.until===job.until);
+     if(old?.retryAt)Object.assign(job,{retryAt:old.retryAt,attempt:old.attempt});
+    }
+   }
+   // Keep the last missed job visible even if a new sync wins the race with a late alarm.
+   await this.recordExpired(existing,now);
+   await this.write(plan,sent,now);
+   return route==='/schedule-report'?response(200,await this.report()):response(204);
+  });
+ }
+ async send(subscription,kind,now,until){
+  let request;
+  try{request=await vapidRequest(subscription,this.env,kind,{
+   now,ttl:until?Math.max(1,Math.floor((until-now)/1000)):90
+  });}
+  catch{return {status:'prepare-failed'};}
+  try{
+   const reply=await fetch(request,{signal:AbortSignal.timeout(8000)});
+   if(reply.ok)return {status:'accepted',http:reply.status};
+   if(reply.status===404||reply.status===410)return {status:'subscription-expired',http:reply.status};
+   return {status:reply.status===429||reply.status>=500?'temporary-failure':'provider-rejected',http:reply.status};
+  }catch{return {status:'temporary-failure'};}
  }
  async test(subscription){
   const now=Date.now();
   if((await this.storage.get('testAfter')||0)>now)return response(429,{error:'Wait 30 seconds between test pushes.'});
   await this.storage.put('testAfter',now+30000);
-  let req;
-  try{req=await vapidRequest(subscription,this.env,'test',{now,ttl:90});}
-  catch{return response(502,{error:'The reminder server could not prepare an encrypted test push. Check the Worker and its signing configuration.'});}
-  try{
-   const result=await fetch(req,{signal:AbortSignal.timeout(8000)});
-   if(result.ok)return response(204);
-   if(result.status===404||result.status===410)return response(409,{error:'The browser subscription has expired. Disconnect push and connect again, then try again.'});
-   return response(502,{error:'The push provider rejected the test (HTTP '+result.status+').'});
-  }catch{return response(502,{error:'Could not reach the push provider. Try again in 30 seconds.'});}
+  const result=await this.send(subscription,'test',now);
+  if(result.status==='accepted')return response(204);
+  if(result.status==='prepare-failed')return response(502,{error:'The reminder server could not prepare an encrypted test push. Check the Worker and its signing configuration.'});
+  if(result.status==='subscription-expired')return response(409,{error:'The browser subscription has expired. Disconnect push and connect again, then try again.'});
+  if(result.http)return response(502,{error:'The push provider rejected the test (HTTP '+result.http+').'});
+  return response(502,{error:'Could not reach the push provider. Try again in 30 seconds.'});
  }
- async alarm(info={}){
-  const now=Date.now(),plan=await this.storage.get('plan'),sent=await this.marks(now);
-  if(!Object.keys(sent).length)await this.storage.delete('sent');else await this.storage.put('sent',sent);
-  const due=plan?.jobs.filter(j=>j.due<=now&&j.until>now&&!sent[j.id])||[];
-  if(!due.length){await this.write(plan,sent,now);return;}
-  const target=due[0].due, batch=due.filter(j=>j.due===target);
-  const kind=batch.some(j=>j.id.endsWith('-incomplete'))?'incomplete':'daily';
-  const ttl=Math.max(1,Math.min(300,Math.floor((Math.min(...batch.map(j=>j.until))-now)/1000)));
-  let res;
-  try{res=await fetch(await vapidRequest(plan.subscription,this.env,kind,{now,ttl}));}
-  catch(err){if((info.retryCount||0)<5)throw err;}
-  let latest=await this.storage.get('plan');
-  if(res?.ok){
-   for(const j of batch)sent[j.id]=now+2*86400000;
-   await this.storage.put('sent',sent);
-  }else if(latest?.revision===plan.revision&&(res?.status===404||res?.status===410)){
-   latest=null;
-  }else if(latest?.revision===plan.revision&&(!res||res.status===429||res.status>=500)&&(info.retryCount||0)<5){
-   throw Error('Push provider temporarily unavailable.');
-  }else if(latest?.revision===plan.revision){
-   const attempted=new Set(batch.map(j=>j.id));latest={...latest,jobs:latest.jobs.filter(j=>!attempted.has(j.id))};
-  }
-  await this.write(latest,sent);
+ async recordExpired(plan,now){
+  const expired=plan?.jobs.filter(j=>j.until<=now).at(-1);
+  if(expired)await this.storage.put('lastDelivery',{status:'missed-window',kind:expired.id.split('-').at(-1),due:expired.due,at:now});
+ }
+ alarm(){
+  return this.run(async()=>{
+   const now=Date.now(),plan=await this.storage.get('plan'),sent=await this.marks(now);
+   if(!Object.keys(sent).length)await this.storage.delete('sent');else await this.storage.put('sent',sent);
+   await this.recordExpired(plan,now);
+   const due=plan?.jobs.filter(j=>Math.max(j.due,j.retryAt||0)<=now&&j.until>now&&!sent[j.id])||[];
+   let latest=plan;
+   if(due.length){
+    const target=due[0].due,batch=due.filter(j=>j.due===target);
+    const kind=batch.some(j=>j.id.endsWith('-incomplete'))?'incomplete':'daily';
+    const until=Math.min(...batch.map(j=>j.until)),at=Date.now();
+    const result=until<=at?{status:'missed-window'}:await this.send(plan.subscription,kind,at,until);
+    const retry=this.retry({...batch[0],until},result);
+    await this.storage.put('lastDelivery',{...result,kind,due:target,at:Date.now(),...(retry?{status:'retrying'}:{})});
+    if(result.status==='accepted'){
+     for(const j of batch)sent[j.id]=now+2*86400000;
+     await this.storage.put('sent',sent);
+    }else if(result.status==='subscription-expired'){
+     latest=null;
+    }else{
+     const attempted=new Set(batch.map(j=>j.id));
+     latest={...plan,jobs:plan.jobs.flatMap(j=>!attempted.has(j.id)?[j]:retry?[{...j,retryAt:retry.retryAt,attempt:retry.attempt}]:[])};
+    }
+   }
+   const test=await this.storage.get('scheduledTest');
+   const testNow=Date.now();
+   if(test&&Math.max(test.due,test.retryAt||0)<=testNow){
+    const result=test.until<=testNow?{status:'missed-window'}:await this.send(test.subscription,'scheduled-test',testNow,test.until);
+    const retry=this.retry(test,result);
+    const recorded={...result,due:test.due,at:Date.now(),...(retry?{status:'retrying'}:{})};
+    await this.storage.put('lastScheduledTest',recorded);
+    if(retry)await this.storage.put('scheduledTest',retry);
+    else await this.storage.delete('scheduledTest');
+   }
+   await this.write(latest,sent);
+  });
+ }
+ retry(job,result){
+  if(result.status!=='temporary-failure')return null;
+  const attempt=(job.attempt||0)+1;
+  const delay=[30000,60000,120000,120000][attempt-1],retryAt=Date.now()+delay;
+  return retryAt<job.until?{...job,attempt,retryAt}:null;
  }
 }

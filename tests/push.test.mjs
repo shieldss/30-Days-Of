@@ -97,8 +97,141 @@ test('service worker distinguishes a test notification from both reminder types'
   addEventListener:(type,listener)=>listeners[type]=listener,
   registration:{showNotification:async(title,options)=>shown.push({title,...options})}
  }});
- for(const kind of ['test','daily','incomplete','unknown'])
+ for(const kind of ['test','daily','daily','incomplete','scheduled-test','unknown'])
   listeners.push({data:{json:()=>({kind})},waitUntil:()=>{}});
  assert.equal(shown[0].title,'30 Days of… · Test push');
- assert.deepEqual(shown.map(item=>item.tag),['30-days-reminder-test','30-days-reminder-daily','30-days-reminder-incomplete']);
+ assert.deepEqual(shown.map(item=>item.tag),['30-days-reminder-test','30-days-reminder-daily','30-days-reminder-daily','30-days-reminder-incomplete','30-days-reminder-scheduled-test']);
+ assert.ok(shown.every(item=>item.renotify));
+});
+
+test('device wall-clock mapping matches expected UTC instants across zones, DST gap, fold and travel',async()=>{
+ const {localReminderTime,deviceTimeZone}=await import('../assets/push-reminders.mjs');
+ const old=process.env.TZ;
+ try{
+  const challenge=(startDate)=>[{...active,startDate,startingDay:1}];
+  const onlyDaily={...settings,incompleteReminder:false};
+  process.env.TZ='America/New_York';
+  assert.equal(deviceTimeZone(),'America/New_York');
+  const autumn=reminderSchedule({settings:onlyDaily,challenges:challenge('2026-10-31')},new Date('2026-10-31T10:00:00Z'));
+  assert.deepEqual(autumn.slice(0,2).map(x=>new Date(x.due).toISOString()),['2026-10-31T11:00:00.000Z','2026-11-01T12:00:00.000Z']);
+  const fold=reminderSchedule({settings:{...onlyDaily,dailyTime:'01:30'},challenges:challenge('2026-11-01')},new Date('2026-11-01T04:00:00Z'));
+  assert.equal(new Date(fold[0].due).toISOString(),'2026-11-01T05:30:00.000Z');
+  assert.equal(fold.filter(j=>j.id==='2026-11-01-daily').length,1);
+  const spring=reminderSchedule({settings:{...onlyDaily,dailyTime:'02:30'},challenges:challenge('2027-03-14')},new Date('2027-03-14T06:00:00Z'));
+  assert.equal(new Date(spring[0].due).toISOString(),'2027-03-14T07:30:00.000Z');
+  assert.equal(spring[0].due,localReminderTime(new Date('2027-03-14T07:00:00Z'),'02:30'));
+  process.env.TZ='America/Los_Angeles';
+  const pacific=reminderSchedule({settings:onlyDaily,challenges:challenge('2026-11-01')},new Date('2026-11-01T06:00:00Z'));
+  assert.equal(new Date(pacific[0].due).toISOString(),'2026-11-01T15:00:00.000Z');
+  process.env.TZ='Asia/Kathmandu';
+  const nepal=reminderSchedule({settings:{...onlyDaily,dailyTime:'00:05'},challenges:challenge('2026-11-01')},new Date('2026-10-31T17:00:00Z'));
+  assert.equal(nepal[0].id,'2026-11-01-daily');
+  assert.equal(new Date(nepal[0].due).toISOString(),'2026-10-31T18:20:00.000Z');
+ }finally{if(old===undefined)delete process.env.TZ;else process.env.TZ=old;}
+});
+
+test('a working immediate test does not hide subscription loss; Sync restores the same pairing and submits the fresh endpoint',async()=>{
+ const {CONFIG_KEY,reconcile,statusMessage,testPushDelivery}=await import('../assets/push-reminders.mjs');
+ const globals=new Map();
+ function mock(key,value){globals.set(key,Object.getOwnPropertyDescriptor(globalThis,key));Object.defineProperty(globalThis,key,{value,configurable:true,writable:true});}
+ const pairing={id:'b'.repeat(32),key:'a'.repeat(64),url:'https://mock.workers.dev',deleting:false};
+ const map=new Map([[CONFIG_KEY,JSON.stringify(pairing)]]), calls=[];
+ const mkSub=name=>({toJSON:()=>({...subscription,endpoint:subscription.endpoint+'/'+name})});
+ let current=mkSub('first'),subscribeCount=0;
+ const scope='https://shieldss.github.io/30-Days-Of/';
+ const registration={
+  scope,active:{postMessage:(_,ports)=>ports[0].postMessage({testPush:true,scheduledPush:true})},
+  pushManager:{
+   getSubscription:async()=>current,
+   permissionState:async()=> 'granted',
+   subscribe:async options=>{
+    subscribeCount++;assert.equal(options.userVisibleOnly,true);
+    assert.equal(options.applicationServerKey.length,65);
+    return current=mkSub('restored');
+   }
+  }
+ };
+ const state={settings:{...settings,dailyTime:'23:59',incompleteReminder:false},
+  challenges:[{...active,startDate:localDay(new Date()),startingDay:1}]};
+ function localDay(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+ mock('localStorage',{getItem:k=>map.get(k),setItem:(k,v)=>map.set(k,v)});
+ mock('Notification',{permission:'granted'});
+ mock('PushManager',class{});
+ mock('isSecureContext',true);
+ mock('location',{href:scope+'#settings'});
+ mock('navigator',{onLine:true,serviceWorker:{getRegistration:async url=>{assert.equal(url,scope);return registration;}}});
+ mock('fetch',async (url,options)=>{
+  const body=options.body&&JSON.parse(options.body);calls.push({url,options,body});
+  if(url.endsWith('/v1/config'))return Response.json({app:'thirty-days-of',publicKey:env.VAPID_PUBLIC_KEY,testPush:true,scheduleDiagnostics:true});
+  if(options.method==='POST')return new Response(null,{status:204});
+  const due=body.jobs[0]?.due;
+  return Response.json({queued:body.jobs.length,next:due?{due,kind:'daily'}:null,alarm:due??null,serverTime:Date.now()});
+ });
+ try{
+  await testPushDelivery();
+  assert.equal(calls.find(x=>x.options.method==='POST').body.endpoint.endsWith('/first'),true);
+  await reconcile(()=>state);
+  current=null;
+  await reconcile(()=>state,{force:true});
+  assert.equal(subscribeCount,1);
+  assert.equal(JSON.parse(map.get(CONFIG_KEY)).key,pairing.key);
+  const puts=calls.filter(x=>x.options.method==='PUT');
+  assert.equal(puts.length,2);
+  assert.equal(puts[1].url,pairing.url+'/v1/device/'+pairing.id);
+  assert.equal(puts[1].body.subscription.endpoint.endsWith('/restored'),true);
+  assert.deepEqual(puts[1].body.jobs,puts[0].body.jobs);
+  assert.match(statusMessage(),/Browser subscription restored/);
+  assert.match(statusMessage(),/Worker confirmed/);
+  current=mkSub('native-replacement');
+  await reconcile(()=>state);
+  assert.equal(calls.filter(x=>x.options.method==='PUT').at(-1).body.subscription.endpoint.endsWith('/native-replacement'),true);
+  assert.equal(subscribeCount,1);
+ }finally{for(const [key,descriptor] of globals)if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}
+});
+
+test('server reports real queue, timed test delivery, retry backoff and invalidation',async()=>{
+ const map=new Map();let alarm=null, mode='accept';
+ const storage={get:async k=>map.get(k),put:async(k,v)=>map.set(k,v),delete:async k=>map.delete(k),getAlarm:async()=>alarm,setAlarm:async n=>{alarm=n;},deleteAlarm:async()=>{alarm=null;}};
+ const device=new ChallengeReminders({storage},env),native=globalThis.fetch,pushes=[];
+ const binding={...env,REMINDERS:{idFromName:x=>x,get:()=>({fetch:(url,options)=>device.fetch(new Request(url,options))})}};
+ const request=(method,body,path='')=>worker.fetch(new Request('https://mock.workers.dev/v1/device/'+'a'.repeat(32)+path,{
+  method,headers:{Origin:env.APP_ORIGIN,Authorization:'Bearer '+env.PAIRING_KEY},body:body&&JSON.stringify(body)
+ }),binding);
+ globalThis.fetch=async req=>{
+  const payload=decrypt(await req.arrayBuffer());
+  pushes.push({payload,ttl:+req.headers.get('TTL'),urgency:req.headers.get('Urgency')});
+  return new Response(null,{status:mode==='reject'?503:201});
+ };
+ try{
+  const now=Date.now(),job={id:'2026-11-28-daily',due:now-250,until:now+899000};
+  const sync=()=>request('PUT',{subscription,jobs:[job],report:true});
+  const queued=await (await sync()).json();
+  assert.equal(queued.queued,1);
+  assert.deepEqual(queued.next,{due:job.due,kind:'daily'});
+  assert.ok(queued.alarm>=now);
+  const timed=await (await request('POST',subscription,'/scheduled-test')).json();
+  assert.ok(timed.due>now+59000);
+  assert.equal((await request('POST',subscription,'/scheduled-test')).status,429);
+  mode='reject';
+  await device.alarm();
+  const retryAlarm=alarm;
+  assert.ok(retryAlarm>now+29000);
+  assert.equal((await (await request('GET')).json()).last.status,'retrying');
+  await sync();assert.equal(alarm,retryAlarm);
+  await device.alarm();assert.equal(pushes.length,1);
+  const test=map.get('scheduledTest');
+  map.set('scheduledTest',{...test,due:now-100,until:now+120000});
+  mode='accept';
+  await device.alarm();
+  const report=await (await request('GET')).json();
+  assert.deepEqual(pushes.map(p=>p.payload.kind),['daily','scheduled-test']);
+  assert.equal(pushes[0].urgency,'high');
+  assert.ok(pushes[0].ttl>850);
+  assert.equal(report.test.status,'accepted');
+  assert.equal(report.queued,1);
+  assert.equal(alarm,retryAlarm);
+  await request('DELETE');
+  assert.equal(map.has('plan'),false);
+  assert.equal(map.has('scheduledTest'),false);
+ }finally{globalThis.fetch=native;}
 });

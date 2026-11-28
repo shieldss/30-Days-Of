@@ -55,3 +55,38 @@ export default {
 
  }
 };
+
+export {ChallengeReminders};
+export const realAlarm = {
+ async test(_ctrl,env){
+  const receiver=await crypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+  const keys={
+   p256dh:base64url(await crypto.subtle.exportKey('raw',receiver.publicKey)),
+   auth:base64url(crypto.getRandomValues(new Uint8Array(16)))
+  };
+  // Let workerd fire the real SQLite-backed Durable Object timer. Do not call alarm().
+  for(const [kind,address] of [['daily','a'],['incomplete','b']]){
+   const now=Date.now(),due=now+350;
+   const send=(method,body)=>worker.fetch(new Request('https://relay.workers.dev/v1/device/'+address.repeat(32),{
+    method,headers:{Origin:env.APP_ORIGIN,Authorization:'Bearer '+env.PAIRING_KEY},body:body&&JSON.stringify(body)
+   }),env);
+   const res=await send('PUT',{
+    report:true,subscription:{endpoint:'https://fcm.googleapis.com/fcm/send/'+kind,keys},
+    jobs:[{id:new Date(now).toISOString().slice(0,10)+'-'+kind,due,until:due+60000}]
+   });
+   if(res.status!==200)throw Error('Could not sync real Durable Object: '+await res.text());
+   const queued=await res.json();
+   if(queued.queued!==1||queued.alarm!==due||queued.next?.kind!==kind)throw Error('Actual alarm was not armed for '+kind+'.');
+   const deadline=now+10000;
+   let report;
+   while(Date.now()<deadline){
+    await new Promise(resolve=>setTimeout(resolve,125));
+    report=await (await send('GET')).json();
+    if(report.last)break;
+   }
+   if(report?.last?.status!=='accepted'||report.last.kind!==kind||report.last.at<due||report.queued!==0)
+    throw Error('Actual alarm did not deliver '+kind+': '+JSON.stringify(report));
+   await send('DELETE');
+  }
+ }
+};
