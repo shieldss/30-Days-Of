@@ -86,6 +86,28 @@ export const realAlarm = {
    }
    if(report?.last?.status!=='accepted'||report.last.kind!==kind||report.last.at<due||report.queued!==0)
     throw Error('Actual alarm did not deliver '+kind+': '+JSON.stringify(report));
+   if(kind==='daily'){
+    // The first daily reminder already sent. A plain repeat for a later time
+    // still deduplicates, while an explicit future-time edit arms today's alarm.
+    const rescheduledAt=Date.now(),later=rescheduledAt+350,day=new Date(now).toISOString().slice(0,10);
+    const job={id:day+'-daily',due:later,until:later+60000};
+    const sync=async row=>await (await send('PUT',{
+     report:true,reportDay:day,subscription:{endpoint:'https://fcm.googleapis.com/fcm/send/daily',keys},jobs:[row]
+    })).json();
+    const suppressed=await sync(job);
+    if(suppressed.queued!==0||!suppressed.today.daily.alreadySent)throw Error('Ordinary same-day repeat was not suppressed.');
+    const edited={...job,rescheduledAt};
+    const moved=await sync(edited);
+    if(moved.queued!==1||moved.alarm!==later||moved.today.daily.due!==later)throw Error('Edited alarm was not re-armed.');
+    while(Date.now()<later+10000){
+     await new Promise(resolve=>setTimeout(resolve,125));
+     report=await (await send('GET')).json();
+     if(report.last?.due===later)break;
+    }
+    if(report.last?.status!=='accepted'||report.last.due!==later||report.last.at<later||report.queued!==0)
+     throw Error('Edited reminder did not fire: '+JSON.stringify(report));
+    if((await sync(edited)).queued!==0)throw Error('Resync re-armed an edited reminder already sent.');
+   }
    await send('DELETE');
   }
  }

@@ -46,3 +46,5 @@ For development, run `node push-worker/runtime-tests/run.mjs` from the repositor
 - **Send test push** needs the current Worker. It makes a real, separately labeled push without changing challenge progress, reminder settings, or pending reminders. If the provider accepts the test, check for the notification on that device. An accepted request does not guarantee that the device displayed it.
 
 - **Test in 1 minute** uses the same Worker alarm as live reminders, and does not need an active challenge. Close the app or lock the device and watch for **30 Days of… · Scheduled test**. If needed, reopen and tap **Sync now** to see whether the provider accepted the scheduled test. Provider acceptance does not prove the phone displayed it.
+
+Changing a reminder to a different, future time on the same local day allows a fresh send even if that kind already fired. An unchanged time, a normal sync, or a move to a past time does not reset the already-sent guard. **Sync now** reports today's Daily challenge and Incomplete day queue status separately. This needs both the current site and the current Worker.

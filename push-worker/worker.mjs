@@ -1,6 +1,7 @@
 // Web Push for 30 Days of…; only generic reminder kinds are carried in the payload.
 const enc=new TextEncoder();
-const LIMIT=15*60000, HORIZON=31*86400000, TEST_DELAY=60000, TEST_WINDOW=3*60000;
+const DAY=86400000, SENT_LIFETIME=2*DAY;
+const LIMIT=15*60000, HORIZON=31*DAY, TEST_DELAY=60000, TEST_WINDOW=3*60000;
 const b64=bytes=>btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
 const jwtPart=v=>b64(enc.encode(JSON.stringify(v)));
 
@@ -62,10 +63,14 @@ export function validateSchedule(raw,now=Date.now()){
  const ids=new Set(),jobs=[];
  for(const j of raw.jobs){
   if(!/^\d{4}-\d{2}-\d{2}-(daily|incomplete)$/.test(j?.id||'')||ids.has(j.id)||!Number.isSafeInteger(j.due)||j.due>now+HORIZON||!Number.isSafeInteger(j.until)||j.until<=j.due||j.until-j.due>LIMIT)throw Error('Invalid reminder time or ID.');
-  ids.add(j.id);if(j.until>now)jobs.push({id:j.id,due:j.due,until:j.until});
+  ids.add(j.id);
+  // Old clients omit this field. Reject an invalid edit marker without dropping valid reminder times.
+  const edited=Number.isSafeInteger(j.rescheduledAt)&&j.rescheduledAt<=now+120000&&j.rescheduledAt<j.due&&j.due-j.rescheduledAt<=26*3600000;
+  if(j.until>now)jobs.push({id:j.id,due:j.due,until:j.until,...(edited?{rescheduledAt:j.rescheduledAt}:{})});
  }
  jobs.sort((a,b)=>a.due-b.due||a.id.localeCompare(b.id));
- return {subscription,jobs};
+ const reportDay=/^\d{4}-\d{2}-\d{2}$/.test(raw.reportDay||'')?raw.reportDay:null;
+ return {subscription,jobs,...(reportDay?{reportDay}:{})};
 }
 function response(status,body){return body===undefined?new Response(null,{status}):Response.json(body,{status});}
 function cors(r,origin){
@@ -114,6 +119,10 @@ export default {
  }
 };
 
+// A mark expires two days after dispatch. The same timestamp also lets us tell
+// a deliberate time edit from a periodic resync, without invalidating old marks.
+const alreadySent=(job,sent)=>Boolean(sent[job.id])&&
+ (!Number.isSafeInteger(job.rescheduledAt)||sent[job.id]-SENT_LIFETIME>=job.rescheduledAt);
 export class ChallengeReminders{
  constructor(ctx,env){this.storage=ctx.storage;this.env=env;this.tail=Promise.resolve();}
  // Serialize queue updates and alarm dispatch on this device. A provider fetch yields;
@@ -123,19 +132,23 @@ export class ChallengeReminders{
   this.tail=next.catch(()=>{});
   return next;
  }
- async report(){
-  const now=Date.now(),[plan,test,last,lastTest,alarm]=await Promise.all([
+ async report(reportDay=null){
+  const now=Date.now(),[plan,test,last,lastTest,alarm,sent]=await Promise.all([
    this.storage.get('plan'),this.storage.get('scheduledTest'),this.storage.get('lastDelivery'),
-   this.storage.get('lastScheduledTest'),this.storage.getAlarm()
+   this.storage.get('lastScheduledTest'),this.storage.getAlarm(),this.marks(now)
   ]);
   const jobs=(plan?.jobs||[]).filter(j=>j.until>now);
   const next=jobs[0];
-  return {queued:jobs.length,next:next?{
+  const today=reportDay?Object.fromEntries(['daily','incomplete'].map(kind=>{
+   const id=reportDay+'-'+kind,job=jobs.find(j=>j.id===id);
+   return [kind,job?{queued:true,due:job.due}:{queued:false,alreadySent:Boolean(sent[id])}];
+  })):null;
+  return {...(today?{today}:{}),queued:jobs.length,next:next?{
    due:next.due,...(next.retryAt?{retryAt:next.retryAt}:{}),kind:jobs.some(j=>j.due===next.due&&j.id.endsWith('-incomplete'))?'incomplete':'daily'
   }:null,alarm,serverTime:now,last:last||null,test:test?{due:test.due}:lastTest||null};
  }
  async write(plan,sent,now=Date.now()){
-  const jobs=(plan?.jobs||[]).filter(j=>j.until>now&&!sent[j.id]);
+  const jobs=(plan?.jobs||[]).filter(j=>j.until>now&&!alreadySent(j,sent));
   const test=await this.storage.get('scheduledTest');
   const next=Math.min(jobs[0]?Math.max(jobs[0].due,jobs[0].retryAt||0):Infinity,
    test?Math.max(test.due,test.retryAt||0):Infinity,...Object.values(sent));
@@ -172,14 +185,16 @@ export class ChallengeReminders{
    // A periodic sync must not wipe retry backoff for the same unchanged job.
    if(existing?.subscription?.endpoint===plan.subscription.endpoint){
     for(const job of plan.jobs){
-     const old=existing.jobs.find(j=>j.id===job.id&&j.due===job.due&&j.until===job.until);
+     const old=existing.jobs.find(j=>j.id===job.id&&j.due===job.due&&j.until===job.until&&j.rescheduledAt===job.rescheduledAt);
      if(old?.retryAt)Object.assign(job,{retryAt:old.retryAt,attempt:old.attempt});
     }
    }
    // Keep the last missed job visible even if a new sync wins the race with a late alarm.
    await this.recordExpired(existing,now);
+   const reportDay=plan.reportDay;
+   delete plan.reportDay;
    await this.write(plan,sent,now);
-   return route==='/schedule-report'?response(200,await this.report()):response(204);
+   return route==='/schedule-report'?response(200,await this.report(reportDay)):response(204);
   });
  }
  async send(subscription,kind,now,until){
@@ -215,7 +230,7 @@ export class ChallengeReminders{
    const now=Date.now(),plan=await this.storage.get('plan'),sent=await this.marks(now);
    if(!Object.keys(sent).length)await this.storage.delete('sent');else await this.storage.put('sent',sent);
    await this.recordExpired(plan,now);
-   const due=plan?.jobs.filter(j=>Math.max(j.due,j.retryAt||0)<=now&&j.until>now&&!sent[j.id])||[];
+   const due=plan?.jobs.filter(j=>Math.max(j.due,j.retryAt||0)<=now&&j.until>now&&!alreadySent(j,sent))||[];
    let latest=plan;
    if(due.length){
     const target=due[0].due,batch=due.filter(j=>j.due===target);
@@ -225,7 +240,7 @@ export class ChallengeReminders{
     const retry=this.retry({...batch[0],until},result);
     await this.storage.put('lastDelivery',{...result,kind,due:target,at:Date.now(),...(retry?{status:'retrying'}:{})});
     if(result.status==='accepted'){
-     for(const j of batch)sent[j.id]=now+2*86400000;
+     for(const j of batch)sent[j.id]=at+SENT_LIFETIME;
      await this.storage.put('sent',sent);
     }else if(result.status==='subscription-expired'){
      latest=null;
