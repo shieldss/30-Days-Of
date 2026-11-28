@@ -4,16 +4,16 @@ const CORE = ['./','./index.html','./styles.css?v=__APP_VERSION__','./challenge-
 const cacheKey = request => { const url = new URL(typeof request === 'string' ? request : request.url, self.registration.scope); url.searchParams.set('__app_cache', VERSION); return url.href; };
 self.addEventListener('install',event=>event.waitUntil(caches.open(VERSION).then(cache=>cache.addAll(CORE.map(cacheKey)))));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith(CACHE_PREFIX)&&key!==VERSION).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
-self.addEventListener('message',event=>{if(event.data?.type==='SKIP_WAITING')self.skipWaiting();if(event.data?.type==='PUSH_TEST_SUPPORT')event.ports[0]?.postMessage({testPush:true});});
+self.addEventListener('message',event=>{if(event.data?.type==='SKIP_WAITING')self.skipWaiting();if(event.data?.type==='PUSH_TEST_SUPPORT')event.ports[0]?.postMessage({testPush:true,scheduledPush:true});});
 self.addEventListener('fetch',event=>{const req=event.request;if(req.method!=='GET'||!req.url.startsWith(self.registration.scope))return;const key=cacheKey(req);event.respondWith(caches.match(key).then(hit=>hit||fetch(req).then(response=>{if(response.ok){const copy=response.clone();caches.open(VERSION).then(cache=>cache.put(key,copy))}return response}).catch(()=>caches.match(cacheKey('./index.html')))))});
 
 self.addEventListener('push',event=>{
  let kind;
  try{kind=event.data?.json().kind;}catch{}
- if(!['daily','incomplete','test'].includes(kind))return;
- const title=kind==='test'?'30 Days of… · Test push':kind==='daily'?'Your 30 Days of… challenge is ready':"Don't lose your streak";
- const body=kind==='test'?'Background push reached this device. Your challenges were not changed.':kind==='daily'?"Open the app to see today’s challenges.":"You have a challenge still to complete today.";
- event.waitUntil(self.registration.showNotification(title,{body,icon:'./assets/icon-192.png',badge:'./assets/icon-192.png',tag:'30-days-reminder-'+kind,renotify:kind==='test',data:{app:'thirty-days-of'}}));
+ if(!['daily','incomplete','test','scheduled-test'].includes(kind))return;
+ const title=kind==='scheduled-test'?'30 Days of… · Scheduled test':kind==='test'?'30 Days of… · Test push':kind==='daily'?'Your 30 Days of… challenge is ready':"Don't lose your streak";
+ const body=kind==='scheduled-test'?'The background alarm reached this device. Your challenges and reminders were not changed.':kind==='test'?'Background push reached this device. Your challenges were not changed.':kind==='daily'?"Open the app to see today’s challenges.":"You have a challenge still to complete today.";
+ event.waitUntil(self.registration.showNotification(title,{body,icon:'./assets/icon-192.png',badge:'./assets/icon-192.png',tag:'30-days-reminder-'+kind,renotify:true,data:{app:'thirty-days-of'}}));
 });
 self.addEventListener('notificationclick',event=>{
  if(event.notification.data?.app!=='thirty-days-of')return;
