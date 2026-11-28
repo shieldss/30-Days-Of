@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createECDH,createDecipheriv,hkdfSync,randomBytes,generateKeyPairSync,verify} from 'node:crypto';
-import {reminderSchedule,pushOrigin} from '../assets/push-reminders.mjs';
+import {applyReminderTimeChange,reminderSchedule,pushOrigin} from '../assets/push-reminders.mjs';
 import worker,{encodePush,vapidRequest,ChallengeReminders,validateSchedule} from '../push-worker/worker.mjs';
 
 const date=(d,h,m=0)=>new Date(2026,10,d,h,m);
@@ -234,4 +234,56 @@ test('server reports real queue, timed test delivery, retry backoff and invalida
   assert.equal(map.has('plan'),false);
   assert.equal(map.has('scheduledTest'),false);
  }finally{globalThis.fetch=native;}
+});
+
+test('a deliberate same-day future time edit clears only its local sent guard',()=>{
+ const now=date(28,12,40),s={...settings,lastDaily:'2026-11-28',lastIncomplete:'2026-11-28'};
+ const state={settings:s,challenges:[{...active,startDate:'2026-11-28',startingDay:1}]};
+ const daily='2026-11-28-daily',incomplete='2026-11-28-incomplete';
+ assert.equal(reminderSchedule(state,now).some(j=>j.id===daily),false);
+ applyReminderTimeChange(s,'dailyTime','12:45',now);
+ const jobs=reminderSchedule(state,now),job=jobs.find(j=>j.id===daily);
+ assert.equal(job.due,+date(28,12,45));assert.equal(job.rescheduledAt,+now);
+ assert.equal(jobs.some(j=>j.id===incomplete),false);
+ assert.equal(jobs.find(j=>j.id==='2026-11-29-daily').rescheduledAt,undefined);
+ // An unchanged time and reopening the app must not reauthorize a second send.
+ s.lastDaily='2026-11-28';
+ applyReminderTimeChange(s,'dailyTime','12:45',date(28,12,46));
+ assert.equal(reminderSchedule(state,date(28,12,46)).some(j=>j.id===daily),false);
+ applyReminderTimeChange(s,'dailyTime','12:44',date(28,12,46));
+ assert.equal(s.lastDaily,'2026-11-28');
+ assert.equal(s.dailyTimeEdit,undefined);
+});
+
+test('Worker re-arms only the edited later time, then suppresses repeats and preserves the other reminder',async()=>{
+ const map=new Map();let alarm=null, count=0;
+ const storage={get:async k=>map.get(k),put:async(k,v)=>map.set(k,v),delete:async k=>map.delete(k),getAlarm:async()=>alarm,setAlarm:async n=>{alarm=n;},deleteAlarm:async()=>{alarm=null;}};
+ const device=new ChallengeReminders({storage},env);
+ device.send=async()=>{count++;return {status:'accepted',http:201};};
+ const binding={...env,REMINDERS:{idFromName:x=>x,get:()=>({fetch:(url,options)=>device.fetch(new Request(url,options))})}};
+ const day='2026-11-28',id=day+'-daily',other=day+'-incomplete',now=Date.now();
+ const latest={id,due:now-300,until:now+60000}, evening={id:other,due:now+3600000,until:now+3660000};
+ const sync=async (first=latest)=>{
+  const reply=await worker.fetch(new Request('https://mock.workers.dev/v1/device/'+'b'.repeat(32),{
+   method:'PUT',headers:{Origin:env.APP_ORIGIN,Authorization:'Bearer '+env.PAIRING_KEY},
+   body:JSON.stringify({subscription,jobs:[first,evening],report:true,reportDay:day})}),binding);
+  assert.equal(reply.status,200);return reply.json();
+ };
+ // Existing production marks are expiry timestamps; no reset is needed on deploy.
+ map.set('sent',{[id]:now-3600000+2*86400000});
+ assert.deepEqual((await sync()).today.daily,{queued:false,alreadySent:true});
+ assert.equal((await sync({...latest,rescheduledAt:now+10})).today.daily.queued,false);
+ const edited={...latest,rescheduledAt:now-1000};
+ const rearmed=await sync(edited);
+ assert.deepEqual(rearmed.today.daily,{queued:true,due:latest.due});
+ assert.equal(rearmed.today.incomplete.due,evening.due);
+ assert.equal(rearmed.queued,2);
+ await device.alarm();
+ assert.equal(count,1);
+ const after=await sync(edited);
+ assert.deepEqual(after.today.daily,{queued:false,alreadySent:true});
+ assert.deepEqual(after.today.incomplete,{queued:true,due:evening.due});
+ assert.equal(after.next.kind,'incomplete');
+ await device.alarm();
+ assert.equal(count,1);
 });

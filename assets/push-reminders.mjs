@@ -10,6 +10,21 @@ export function localReminderTime(day,time){
  const [h,m]=time.split(':').map(Number);
  return +new Date(day.getFullYear(),day.getMonth(),day.getDate(),h,m);
 }
+// Re-arm only an intentional move to a different future time on this local date.
+const timeFields={dailyTime:['lastDaily','dailyTimeEdit'],incompleteTime:['lastIncomplete','incompleteTimeEdit']};
+export function applyReminderTimeChange(settings,field,value,now=new Date()){
+ const keys=Object.hasOwn(timeFields,field)?timeFields[field]:null;
+ if(!keys)return false;
+ if(!validTime(value)||settings[field]===value)return true;
+ const [last,edit]=keys,date=localDate(now);
+ settings[field]=value;
+ delete settings[edit];
+ if(localReminderTime(now,value)>+now){
+  settings[edit]={date,time:value,at:+now};
+  if(settings[last]===date)delete settings[last];
+ }
+ return true;
+}
 export const deviceTimeZone=()=>Intl.DateTimeFormat().resolvedOptions().timeZone||'device local time';
 const formattedDue=due=>new Date(due).toLocaleString([], {
  weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'
@@ -29,7 +44,9 @@ export function reminderSchedule(state,now=new Date()){
    const timestamp=localReminderTime(noon,time);
    const end=Math.min(timestamp+LATE,+new Date(noon.getFullYear(),noon.getMonth(),noon.getDate()+1));
    if(end<=+now||end<=timestamp)return;
-   result.push({id:date+'-'+kind,due:timestamp,until:end});
+   const edit=s[kind==='daily'?'dailyTimeEdit':'incompleteTimeEdit'];
+   const changed=offset===0&&edit?.date===date&&edit.time===time&&Number.isSafeInteger(edit.at)&&edit.at<timestamp;
+   result.push({id:date+'-'+kind,due:timestamp,until:end,...(changed?{rescheduledAt:edit.at}:{})});
   };
   if(s.dailyReminder)due(s.dailyTime,'daily');
   if(s.incompleteReminder&&scheduled.some(([c,d])=>!c.days?.some(x=>Number(x.day)===d&&(x.completed||x.skipped))))due(s.incompleteTime,'incomplete');
@@ -66,7 +83,7 @@ const queue=fn=>{const next=tail.then(fn);tail=next.catch(()=>{});return next;};
 const status=s=>{message=s;listener();};
 export const onStatus=cb=>{listener=cb;};
 export const statusMessage=()=>message;
-const send=(c,sub,jobs)=>api(c,path(c),'PUT',{subscription:sub.toJSON(),jobs,report:true});
+const send=(c,sub,jobs)=>api(c,path(c),'PUT',{subscription:sub.toJSON(),jobs,report:true,reportDay:localDate(new Date())});
 const fingerprint=(c,subscription,jobs)=>JSON.stringify([c.id,subscription,jobs]);
 function serverKey(config){
  if(config.app!=='thirty-days-of')throw Error('This is not the 30 Days of… reminder server. Use the separate Worker URL, not Fuel & Flow’s.');
@@ -168,6 +185,13 @@ export function syncMessage(jobs,report=null){
  if(!report.next)text='Worker synced. No new reminders are queued. Make sure an active challenge allows reminders and that Daily challenge or Incomplete day is on; already-sent reminders won’t repeat.';
  else if(!Number.isFinite(report.alarm))text='Worker has '+report.queued+' queued reminders but no alarm. Tap Sync now again.';
  else text='Worker confirmed '+report.queued+' queued '+(report.queued===1?'reminder':'reminders')+'. Next: '+kindName(report.next.kind)+' at '+formattedDue(report.next.due)+'.';
+ if(report.today){
+  for(const kind of ['daily','incomplete']){
+   const item=report.today[kind];
+   if(!item)continue;
+   text+=' '+kindName(kind)+' today: '+(item.queued?'queued for '+formattedDue(item.due):item.alreadySent?'already sent by the Worker':'not queued')+'.';
+  }
+ }else if(jobs.some(j=>Number.isSafeInteger(j.rescheduledAt)))text+=' Update the Worker to support moving today’s reminder to a new time.';
  if(report.next?.retryAt)text+=' Retry scheduled for '+formattedDue(report.next.retryAt)+'.';
  if(Number.isFinite(report.serverTime)&&Math.abs(Date.now()-report.serverTime)>120000)text+=' The device clock differs from the Worker by over two minutes; check automatic date and time.';
  if(report.last)text+=' Last '+kindName(report.last.kind).toLowerCase()+' at '+formattedDue(report.last.due)+' '+deliveryText(report.last)+'.';
